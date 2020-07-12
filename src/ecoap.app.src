@@ -1,0 +1,13 @@
+{application, ecoap,
+ [{description, "CoAP library"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {applications, [kernel,
+                  stdlib
+                 ]},
+  {maintainers, ["Christoffer Vikstrom"]},
+  {licenses, ["Apache"]},
+  {links, [{"Github", "https://github.com/cvik/ecoap"}]},
+  {modules, []},
+  {env, []}
+ ]}.
