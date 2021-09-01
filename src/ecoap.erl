@@ -1,7 +1,5 @@
 %%% CoAP encode/decode library
 %%%
-%%%  TODO:
-%%%  - [ ] Better error handling
 
 -module(ecoap).
 
@@ -9,16 +7,15 @@
 
 %% Types ----------------------------------------------------------------------
 
-%% -type packet()
--type type()     :: confirmable|non_confirmable|acknowledgement|reset.
--type request()  :: get|post|put|delete.
--type response() :: success()|client_error()|server_error().
 -type packet()   :: #{type:=type(),
                       code:=request()|response(),
                       msg_id:=non_neg_integer(),
                       token:=binary(),
                       options:=[option()],
                       payload:=binary()}.
+-type type()     :: confirmable|non_confirmable|acknowledgement|reset.
+-type request()  :: get|post|put|delete.
+-type response() :: success()|client_error()|server_error().
 -type option()   :: {option_type(), iodata()}.
 
 -type option_type()  :: if_match|uri_host|etag|if_none_match|uri_port
@@ -39,7 +36,18 @@
 %% Encode ----------
 
 -spec encode(packet()) -> {ok, iodata()} | {error, error()}.
-encode(#{type:=Type, code:=Code} = Packet) ->
+encode(Packet) ->
+    try encode_packet(Packet) of
+        {ok, IoData} ->
+            {ok, IoData};
+        {error, Error} ->
+            {error, Error}
+    catch
+        _:Error ->
+            {error, Error}
+    end.
+
+encode_packet(#{type:=Type, code:=Code} = Packet) ->
     EncType = encode_type(Type),
     EncCode = encode_code(Code),
     {Tkl, Token} = encode_token(Packet),
@@ -48,12 +56,13 @@ encode(#{type:=Type, code:=Code} = Packet) ->
     Options = encode_options(Packet),
     {ok, <<1:2, EncType:2, Tkl:4, EncCode/binary,
            MsgId:16, Token/binary, Options/binary, Payload/binary>>};
-encode(_) -> {error, badarg}.
+encode_packet(_) -> {error, bad_packet}.
 
 encode_type(confirmable) -> 0;
 encode_type(non_confirmable) -> 1;
 encode_type(acknowledgement) -> 2;
-encode_type(reset) -> 3.
+encode_type(reset) -> 3;
+encode_type(Type) -> throw({type_not_supported, Type}).
 
 encode_code(get) -> <<0:3, 1:5>>;
 encode_code(post) -> <<0:3, 2:5>>;
@@ -80,7 +89,7 @@ encode_code(bad_gateway) -> <<5:3, 2:5>>;
 encode_code(service_unavailable) -> <<5:3, 3:5>>;
 encode_code(gateway_timeout) -> <<5:3, 4:5>>;
 encode_code(proxying_not_supported) -> <<5:3, 5:5>>;
-encode_code(_) -> {error, code_not_supported}.
+encode_code(Code) -> throw({code_not_supported, Code}).
 
 encode_token(#{token:=Token}) -> {size(Token), Token};
 encode_token(_) -> {0, <<>>}.
@@ -94,12 +103,13 @@ encode_payload(_) -> <<>>.
 
 encode_options(#{options:=[]}) -> <<>>;
 encode_options(#{options:=Options}) ->
-    NewOptions = lists:sort(fun({Opt1, _}, {Opt2, _}) ->
-                                    encode_option_num(Opt1) =< encode_option_num(Opt2)
-                            end, Options),
+    NewOptions =
+        lists:sort(fun({Opt1, _}, {Opt2, _}) ->
+                       encode_option_num(Opt1) =< encode_option_num(Opt2)
+                   end, Options),
     F = fun(Opt, {Bins, PrevNum}) ->
-                {Bin, Num} = encode_option(Opt, PrevNum),
-                {[Bin|Bins], Num}
+            {Bin, Num} = encode_option(Opt, PrevNum),
+            {[Bin|Bins], Num}
         end,
     {Bins, _} = lists:foldl(F, {[], 0}, NewOptions),
     iolist_to_binary(lists:reverse(Bins));
@@ -131,23 +141,44 @@ encode_option_num(accept) -> 17;
 encode_option_num(location_query) -> 20;
 encode_option_num(proxy_uri) -> 35;
 encode_option_num(proxy_scheme) -> 39;
-encode_option_num(size1) -> 60.
+encode_option_num(size1) -> 60;
+encode_option_num(Opt) -> throw({unsupported_option, Opt}).
 
 % Decode ----------
 
 -spec decode(binary()) -> {ok, packet()} | {error, error()}.
-decode(<<1:2, T:2, Tkl:4, Class:3, Detail:5, MsgID:16, Token:Tkl/binary, Rest/binary>>) ->
+decode(IoData) ->
+    try decode_packet(IoData) of
+        {ok, Packet} ->
+            {ok, Packet};
+        {error, Error} ->
+            {error, Error}
+    catch
+        _:Error ->
+            {error, Error}
+    end.
+
+decode_packet(<<1:2, T:2, Tkl:4, Class:3, Detail:5, MsgID:16, Token:Tkl/binary, Rest/binary>>) ->
     {Options, Payload} = decode_options(Rest),
     {ok, #{type=>decode_type(T),
-           token=>Token,
-           code=>decode_code(Class, Detail),
-           msg_id=>MsgID,
-           options=>Options,
-           payload=>Payload}};
-decode(_) -> {error, badarg}.
+        token=>Token,
+        code=>decode_code(Class, Detail),
+        msg_id=>MsgID,
+        options=>Options,
+        payload=>Payload}};
+decode_packet(_) -> {error, bad_packet}.
 
 decode_options(<<>>) -> {[], <<>>};
-decode_options(Bin) -> decode_options(Bin, 0, []).
+decode_options(Bin) ->
+    try decode_options(Bin, 0, []) of
+        {Opts, Rest} ->
+            {Opts, Rest}
+    catch
+        throw:Error ->
+            throw(Error);
+        _:_ ->
+            throw(bad_options)
+    end.
 
 decode_options(<<>>, _, Opts) ->
     {lists:reverse(Opts), <<>>};
@@ -161,12 +192,12 @@ decode_options(<<Delta:4, Len:4, Rest/binary>>, Sum, Opts) ->
 
 decode_ext_delta(13, <<Delta:8, Rest/binary>>) -> {Delta+13, Rest};
 decode_ext_delta(14, <<Delta:16, Rest/binary>>) -> {Delta+269, Rest};
-decode_ext_delta(15, Rest) -> {error, {truncated_option, Rest}};
+decode_ext_delta(15, Rest) -> throw({option_delta, Rest});
 decode_ext_delta(Delta, Rest) when Delta < 13 -> {Delta, Rest}.
 
 decode_ext_len(13, <<Len:8, Rest/binary>>) -> {Len+13, Rest};
 decode_ext_len(14, <<Len:16, Rest/binary>>) -> {Len+269, Rest};
-decode_ext_len(15, Rest) -> {error, {truncated_option, Rest}};
+decode_ext_len(15, Rest) -> throw({option_len, Rest});
 decode_ext_len(Len, Rest) when Len < 13 -> {Len, Rest}.
 
 decode_type(0) -> confirmable;
@@ -199,7 +230,7 @@ decode_code(5, 2) -> bad_gateway;
 decode_code(5, 3) -> service_unavailable;
 decode_code(5, 4) -> gateway_timeout;
 decode_code(5, 5) -> proxying_not_supported;
-decode_code(C, D) -> {unknown_code, C, D}.
+decode_code(C, D) -> throw({unknown_code, C, D}).
 
 decode_option(1) -> if_match;
 decode_option(3) -> uri_host;
@@ -217,4 +248,4 @@ decode_option(20) -> location_query;
 decode_option(35) -> proxy_uri;
 decode_option(39) -> proxy_scheme;
 decode_option(60) -> size1;
-decode_option(N) -> {error, {unknown_option, N}}.
+decode_option(N) -> throw({unknown_option, N}).

@@ -1,1 +1,1 @@
-# ecoap - simple coap utilities
+# ecoap - simple coap encode/decode library
